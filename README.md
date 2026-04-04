@@ -38,6 +38,26 @@ If your virtual environment is already activated, the equivalent command is:
 docling-tools models download --output-dir models/docling
 ```
 
+## Expected folder layout
+
+The unified pipeline works best with this structure:
+
+```bash
+Docling/
+  scripts/
+    unified_pipeline.py
+  models/
+    docling/
+  outputs/
+```
+
+What matters:
+
+- `scripts/unified_pipeline.py` is the main runner
+- `models/docling/` stores the local Docling artifacts
+- `outputs/` is where the pipeline writes `read_llm.md`, `read_llm_augmented.md`, `read_llm.docx`, `document.json`, and the extracted `images/`
+- you can keep PDFs at the repo root or pass any absolute path to the script
+
 ## Recommended settings
 
 For your current product flow, the best validated setup is:
