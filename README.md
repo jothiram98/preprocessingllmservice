@@ -1,126 +1,140 @@
-# Docling local pipeline test
+# Docling Local Pipeline
 
-This workspace contains a minimal Docling pipeline for testing local document processing with local model artifacts.
+This workspace contains a local-first PDF processing pipeline built on Docling. It extracts document text, exports screenshots as image files, injects stubbed LLM image notes into Markdown, and generates a DOCX from the augmented Markdown.
 
-## 1. Install dependencies into the active virtual environment
+## What the pipeline produces
+
+When you run `scripts/unified_pipeline.py`, it creates:
+
+- `document.json`: Docling structured export
+- `read_llm.md`: base Markdown with referenced image tags
+- `read_llm_augmented.md`: Markdown with an `LLM image note` inserted after each image tag
+- `read_llm.docx`: DOCX generated from the augmented Markdown
+- `images/`: extracted picture assets from the PDF
+
+This is designed for the workflow where screenshots are extracted locally first, then later passed to an OpenAI vision call by replacing the stub in `describe_image_with_llm(...)`.
+
+## Install dependencies
+
+Use the active virtual environment:
 
 ```bash
 python -m pip install -r requirements.txt
 ```
 
-Docling installation guidance:
+## Download Docling models
 
-- The Docling docs say the base install is `pip install docling`.
-- For local/offline usage, the docs recommend prefetching models and passing `artifacts_path` or `DOCLING_ARTIFACTS_PATH`.
-- On macOS, `OcrMacOptions` is a supported OCR engine for local OCR.
-
-Sources:
-
-- [Installation](https://docling-project.github.io/docling/getting_started/installation/)
-- [Quickstart](https://docling-project.github.io/docling/getting_started/quickstart/)
-- [Advanced options](https://docling-project.github.io/docling/usage/advanced_options/)
-
-## 2. Download the local Docling models
-
-After Docling is installed, prefetch models:
+Prefetch the local Docling artifacts into this repo:
 
 ```bash
 .venv/bin/docling-tools models download --output-dir models/docling
 ```
 
-The installed `docling-tools` CLI supports `--output-dir`, so this keeps the local model cache inside the project.
+You can then point the pipeline to `models/docling` with `--artifacts-path models/docling`.
 
-You can then either:
-
-- point the script to `models/docling` with `--artifacts-path models/docling`
-- or export `DOCLING_ARTIFACTS_PATH="$PWD/models/docling"`
-- or use the Docling default cache path if you prefer a shared cache
-
-If you want the script to enforce offline mode, pass `--force-offline`.
-
-## 3. Run the sample pipeline
-
-Use a local PDF file:
+If your virtual environment is already activated, the equivalent command is:
 
 ```bash
-python scripts/local_docling_pipeline.py /absolute/path/to/document.pdf \
-  --artifacts-path models/docling \
-  --output-dir outputs \
-  --force-offline \
-  --image-mode embedded
+docling-tools models download --output-dir models/docling
 ```
 
-Outputs:
+## Recommended settings
 
-- `outputs/<filename>.md`
-- `outputs/<filename>.json`
+For your current product flow, the best validated setup is:
 
-## Notes
+- `--ocr-engine none`
+- `--image-scale 2`
+- `--verbose`
 
-- The script keeps `enable_remote_services=False`, so it stays on local execution for document processing.
-- OCR now defaults to `rapidocr` for cross-platform consistency; use `--ocr-engine ocrmac` if you specifically need that engine on macOS or `--ocr-engine easyocr` when you want EasyOCR.
-- By default the script embeds extracted page/diagram thumbnails into the Markdown/JSON outputs (`--image-mode embedded`). Pass `--image-mode referenced` to release each image into `outputs/images/` (and let the Markdown link to that file) or `--image-mode placeholder` if you just want the document outline without image stubs.
+Why:
 
-## Generate RAG chunks
+- OCR is not needed when screenshots are only being extracted as images and will later be sent to an LLM.
+- `image-scale 2` improves extracted screenshot quality compared to the default scale.
+- verbose logging shows the full processing flow and total elapsed time.
 
-Once you have the JSON output from Docling you can feed it into a vector database with another helper:
+## Run the unified pipeline
+
+Recommended command:
 
 ```bash
-.venv/bin/python scripts/extract_rag_chunks.py \
-  outputs/Update_Country_Code_Template_embedded.json \
-  --output outputs/Update_Country_Code_Template_chunks.jsonl \
-  --max-chars 1200 \
-  --save-images
+python scripts/unified_pipeline.py Update_Country_Code_Template.pdf --output-dir outputs/pipeline_ocr_off_hq --artifacts-path models/docling --ocr-engine none --image-scale 2 --verbose
 ```
 
-- `Update_Country_Code_Template_chunks.jsonl` contains text chunks plus picture records (with OCR captions for each screenshot). Each line is a JSON object that you can embed, store metadata from, or trace back to `source` + `page`.
-- `--save-images` writes the base64 images embedded in the JSON into `outputs/chunks_images/picture-#.png`, giving you a PNG to inspect if you want to embed image data or show the screenshot alongside the vector chunk.
+What this does:
 
-## Create annotated DOCX
+- parses the PDF with Docling using local artifacts
+- exports referenced images into `outputs/pipeline_ocr_off_hq/images/`
+- writes `read_llm.md`
+- scans `read_llm.md` for image tags
+- calls `describe_image_with_llm(image_path)` as a stub
+- writes `read_llm_augmented.md`
+- generates `read_llm.docx`
+- logs total processing time from start to finish
 
-- If you want a DOCX that mirrors the PDF and keeps the screenshot captions/descriptions, run:
+## How image notes work
+
+The current implementation does not call any external LLM yet.
+
+Instead, `scripts/unified_pipeline.py` contains:
+
+- `describe_image_with_llm(image_path)`: stub function to replace later with your OpenAI vision call
+
+Current behavior:
+
+- finds each Markdown image tag
+- resolves the local PNG path
+- inserts a line like:
+
+```markdown
+*LLM image note:* Stub response for image_000001.png...
+```
+
+This keeps the note anchored to the same image location in the Markdown.
+
+## Notes on chunking and embeddings
+
+For RAG and embeddings, the current augmented Markdown structure is already usable because:
+
+- each image note sits next to the correct image reference
+- screenshots remain inside the right section context
+- the surrounding headings and step text provide semantic grounding
+
+Recommended embedding strategy:
+
+- chunk by section or subsection heading
+- keep the nearby image note in the same chunk or attach it as a sibling chunk
+- store metadata such as:
+  - `section`
+  - `image_path`
+  - `source_file`
+  - `chunk_type`
+
+Perfect visual placement is less important for embeddings than strong semantic grouping.
+
+## Timing and quality
+
+The unified pipeline logs:
+
+- processing start configuration
+- output locations
+- total processing time
+
+If image quality still needs improvement, try:
 
 ```bash
-.venv/bin/python scripts/docling_to_docx.py \
-  outputs/Update_Country_Code_Template_embedded.json \
-  --output outputs/Update_Country_Code_Template.docx \
-  --image-width 5
+--image-scale 3
 ```
 
-- The script walks `doc.body`, writes each text block into the DOCX, inserts each picture as a PNG, and prefixes the embedded screenshot with “Screenshot description:” plus the OCR text extracted from the figure.
-- You can open `outputs/Update_Country_Code_Template.docx` to verify that every image and its description are preserved in the same order as the original document.
-- If your PDF already contains selectable text, you can skip OCR with `--ocr-engine none`.
-- If you want a simpler first pass, disable table extraction with `--no-tables`.
+This will usually improve screenshot clarity further, but it will also increase processing time and memory usage.
 
-## Create placeholder DOCX with Hugging Face
+## Future OpenAI integration point
 
-When your product only needs to keep the image path plus an HF-generated description (rather than embedding the PNG), run:
+When you are ready to connect OpenAI, replace the body of:
 
-```bash
-.venv/bin/python scripts/image_placeholder_docx.py \
-  outputs/Update_Country_Code_Template_embedded.json \
-  --output outputs/Update_Country_Code_Template_placeholders.docx \
-  --image-dir outputs/extracted_images \
+```python
+describe_image_with_llm(image_path: Path) -> str
 ```
 
-- Each PictureItem is saved into `outputs/extracted_images/picture-#.png`; the helper resizes the PNG, encodes it, and posts it to Hugging Face’s `meta-llama/llama-4-scout-17b-16e-instruct` multimodal endpoint along with the instruction “Describe the contents...”.
-- The DOCX is generated in document order; paragraphs stay where they were, and each time an image occurs it emits `Image: outputs/extracted_images/picture-#.png` followed by `Description: <HF text>`.
-- Set `HUGGINGFACE_API_TOKEN` inside `.env` before running so the request can authenticate, and watch the console as each description arrives if you want to see the text in real time.
-```
+in `scripts/unified_pipeline.py`.
 
-The script sends each PictureItem to Hugging Face’s `Qwen2.5-VL-7B-Instruct` endpoint with the prompt “Describe the contents of this screenshot in a concise sentence.”  
-The DOCX is generated in document order, inserting `Image: outputs/extracted_images/picture-#.png` followed by `Description: ...` (the HF response) whenever an image appears.  
-Ensure `HUGGINGFACE_API_TOKEN` is set in `.env` (the repo ships one for local experimentation) so the HTTP request can authenticate.
-
-You can quickly verify the Hugging Face API is reachable by running:
-
-```bash
-.venv/bin/python scripts/test_hf_connection.py \
-  --model https://api-inference.huggingface.co/models/microsoft/trocr-base-printed \
-  --image outputs/extracted_images/picture-1.png
-```
-
-- The repository already ships a `.env` file with the API key (for local experimentation); make sure you never commit a production key and prefer secrets managers for deployed runs.
-
-
-The repository includes a `.env` with `HUGGINGFACE_API_TOKEN` for local runs; replace it with your own secret or wire in a secret manager before deploying.
+That is the only place you need to swap from stubbed behavior to the real vision API call.
