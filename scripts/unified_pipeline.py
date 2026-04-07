@@ -16,7 +16,13 @@ from docling.datamodel.pipeline_options import (
     RapidOcrOptions,
     TableStructureOptions,
 )
-from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling.document_converter import (
+    DocumentConverter,
+    ExcelFormatOption,
+    PdfFormatOption,
+    PowerpointFormatOption,
+    WordFormatOption,
+)
 from docling_core.types.doc import ImageRefMode
 from docling_core.types.doc.document import DoclingDocument
 from docx import Document
@@ -49,39 +55,70 @@ def build_ocr_options(ocr_engine: str):
     return None
 
 
+def detect_input_format(input_file: Path) -> InputFormat:
+    suffix = input_file.suffix.lower()
+    if suffix == ".pdf":
+        return InputFormat.PDF
+    if suffix == ".docx":
+        return InputFormat.DOCX
+    if suffix == ".pptx":
+        return InputFormat.PPTX
+    if suffix == ".xlsx":
+        return InputFormat.XLSX
+    if suffix == ".doc":
+        raise ValueError(
+            "Legacy .doc files are not supported directly. Convert the file to .docx first."
+        )
+    raise ValueError(
+        f"Unsupported file type: {suffix}. Supported types are .pdf, .docx, .pptx, and .xlsx."
+    )
+
+
 def build_converter(args: argparse.Namespace) -> DocumentConverter:
-    accelerator_options = AcceleratorOptions(device=AcceleratorDevice(args.device))
+    input_format = detect_input_format(args.input_file)
 
-    pipeline_options = PdfPipelineOptions(
-        artifacts_path=str(args.artifacts_path),
-        enable_remote_services=False,
-        accelerator_options=accelerator_options,
-        do_ocr=args.ocr_engine != "none",
-        do_table_structure=not args.no_tables,
-        generate_picture_images=True,
-    )
-    pipeline_options.table_structure_options = TableStructureOptions()
-    pipeline_options.table_structure_options.do_cell_matching = True
-    pipeline_options.images_scale = args.image_scale
+    if input_format == InputFormat.PDF:
+        accelerator_options = AcceleratorOptions(device=AcceleratorDevice(args.device))
 
-    ocr_options = build_ocr_options(args.ocr_engine)
-    if ocr_options:
-        pipeline_options.ocr_options = ocr_options
+        pipeline_options = PdfPipelineOptions(
+            artifacts_path=str(args.artifacts_path),
+            enable_remote_services=False,
+            accelerator_options=accelerator_options,
+            do_ocr=args.ocr_engine != "none",
+            do_table_structure=not args.no_tables,
+            generate_picture_images=True,
+        )
+        pipeline_options.table_structure_options = TableStructureOptions()
+        pipeline_options.table_structure_options.do_cell_matching = True
+        pipeline_options.images_scale = args.image_scale
 
-    return DocumentConverter(
-        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
-    )
+        ocr_options = build_ocr_options(args.ocr_engine)
+        if ocr_options:
+            pipeline_options.ocr_options = ocr_options
+
+        format_option = PdfFormatOption(pipeline_options=pipeline_options)
+    elif input_format == InputFormat.DOCX:
+        format_option = WordFormatOption()
+    elif input_format == InputFormat.PPTX:
+        format_option = PowerpointFormatOption()
+    elif input_format == InputFormat.XLSX:
+        format_option = ExcelFormatOption()
+    else:
+        raise ValueError(f"Unsupported input format: {input_format}")
+
+    return DocumentConverter(format_options={input_format: format_option})
 
 
 def run_docling(args: argparse.Namespace) -> tuple[DoclingDocument, Path, Path]:
     converter = build_converter(args)
-    result = converter.convert(str(args.input_pdf))
+    result = converter.convert(str(args.input_file))
     doc = result.document
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     image_dir = args.output_dir / "images"
-    markdown_path = args.output_dir / "read_llm.md"
-    json_path = args.output_dir / "document.json"
+    stem = args.input_file.stem
+    markdown_path = args.output_dir / f"{stem}_read_llm.md"
+    json_path = args.output_dir / f"{stem}_document.json"
 
     LOG.info("Saving JSON to %s", json_path)
     doc.save_as_json(
@@ -197,7 +234,11 @@ def generate_docx_from_augmented_markdown(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="One-shot Docling pipeline with LLM-ready Markdown output.")
-    parser.add_argument("input_pdf", type=Path, help="Path to the PDF to process.")
+    parser.add_argument(
+        "input_file",
+        type=Path,
+        help="Path to the file to process (.pdf, .docx, .pptx, .xlsx).",
+    )
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -243,11 +284,11 @@ def main() -> None:
     configure_logging(args.verbose)
     start_time = time.perf_counter()
     try:
-        if not args.input_pdf.exists():
-            raise FileNotFoundError(f"Input PDF not found: {args.input_pdf}")
+        if not args.input_file.exists():
+            raise FileNotFoundError(f"Input file not found: {args.input_file}")
         LOG.info(
             "Processing %s with ocr=%s, image_scale=%.2f",
-            args.input_pdf,
+            args.input_file,
             args.ocr_engine,
             args.image_scale,
         )
@@ -255,7 +296,7 @@ def main() -> None:
         llm_stub = build_llm_stub(md_path)
         augmented_md_path, inserted_notes = augment_markdown_with_llm(md_path)
 
-        docx_path = args.docx_output or args.output_dir / "read_llm.docx"
+        docx_path = args.docx_output or args.output_dir / f"{args.input_file.stem}_read_llm.docx"
         generate_docx_from_augmented_markdown(
             augmented_md_path,
             docx_path,
